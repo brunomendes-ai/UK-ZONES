@@ -1,4 +1,6 @@
 
+
+
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import type { LocationData } from './types';
 import { LOCATIONS } from './constants';
@@ -19,10 +21,14 @@ const App: React.FC = () => {
     const [isSynced, setIsSynced] = useState<boolean>(false);
     const [uniformRadius, setUniformRadius] = useState<number>(10);
     const [showLabels, setShowLabels] = useState<boolean>(true);
+    const [showHeatmap, setShowHeatmap] = useState<boolean>(false);
+    const [isClusteringEnabled, setIsClusteringEnabled] = useState<boolean>(true);
 
     const mapRef = useRef<any>(null);
     const mapContainerRef = useRef<HTMLDivElement>(null);
     const layerRefs = useRef<{ [key: number]: { marker: any; circle: any } }>({});
+    const markerClusterGroupRef = useRef<any>(null);
+    const heatmapLayerRef = useRef<any>(null);
 
     const filteredLocations = useMemo(() =>
         LOCATIONS.filter(location =>
@@ -64,6 +70,22 @@ const App: React.FC = () => {
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(map);
+        
+        // Prepare data for heatmap
+        const heatPoints = LOCATIONS.map(loc => [loc.lat, loc.lng, loc.courierNeed]);
+        
+        // Initialize heatmap layer
+        const heatLayer = L.heatLayer(heatPoints, { 
+            radius: 25, 
+            blur: 15, 
+            maxZoom: 12,
+            gradient: {0.1: 'blue', 0.3: 'lime', 0.5: 'yellow', 1: 'red'} 
+        });
+        heatmapLayerRef.current = heatLayer;
+
+        // Initialize marker cluster group
+        const markerClusterGroup = L.markerClusterGroup();
+        markerClusterGroupRef.current = markerClusterGroup;
 
         // Function to handle radius updates from popup sliders
         window.updateRadius = (id, radius) => {
@@ -77,16 +99,28 @@ const App: React.FC = () => {
 
             const customIcon = createMarkerIcon(loc, true); // Initially show labels
             
-            const marker = L.marker([loc.lat, loc.lng], { icon: customIcon }).addTo(map);
+            const marker = L.marker([loc.lat, loc.lng], { icon: customIcon });
 
-            // Create circle overlay
+            // Create circle overlay, but don't add to map yet
             const circle = L.circle([loc.lat, loc.lng], {
                 color: '#000',
                 weight: 1,
                 fillColor: '#3b82f6',
                 fillOpacity: 0.3,
                 radius: 10 * 1000, // initial 10km radius in meters
-            }).addTo(map);
+            });
+
+            // Link circle visibility to marker visibility for clustering
+            marker.on('add', () => {
+                if (!map.hasLayer(circle)) {
+                    map.addLayer(circle);
+                }
+            });
+            marker.on('remove', () => {
+                if (map.hasLayer(circle)) {
+                    map.removeLayer(circle);
+                }
+            });
 
             // Create popup content with a slider
             const popupContent = `
@@ -108,23 +142,36 @@ const App: React.FC = () => {
             marker.bindPopup(popupContent);
             
             layerRefs.current[loc.id] = { marker, circle };
+
+            // Add marker to the cluster group
+            markerClusterGroup.addLayer(marker);
         });
 
+        // Add the cluster group to the map initially
+        map.addLayer(markerClusterGroup);
         setRadii(initialRadii);
         
         // Add Legend
         const legend = L.control({ position: 'bottomleft' });
         legend.onAdd = function () {
-            const div = L.DomUtil.create('div', 'info legend bg-white p-3 rounded-lg shadow-lg');
+            const div = L.DomUtil.create('div', 'info legend bg-white p-3 rounded-lg shadow-lg w-48');
             div.innerHTML = `
                 <h4 class="font-bold mb-2 text-gray-800">Legend</h4>
                 <div class="flex items-center mb-1">
                     <div class="bg-red-600 w-4 h-4 rounded-full border-2 border-white mr-2"></div>
-                    <span class="text-sm text-gray-700">Courier Needs Hotspot</span>
+                    <span class="text-sm text-gray-700">Courier Hotspot</span>
                 </div>
-                <div class="flex items-center">
+                <div class="flex items-center mb-2">
                     <div class="w-4 h-4 rounded-full mr-2" style="background-color: rgba(59, 130, 246, 0.3); border: 1px solid #000;"></div>
                     <span class="text-sm text-gray-700">Coverage Radius</span>
+                </div>
+                <div>
+                    <span class="font-semibold text-gray-700 text-sm">Heatmap Intensity</span>
+                    <div class="w-full h-4 mt-1 rounded" style="background: linear-gradient(to right, blue, lime, yellow, red);"></div>
+                    <div class="flex justify-between text-xs text-gray-600">
+                        <span>Low</span>
+                        <span>High</span>
+                    </div>
                 </div>
             `;
             return div;
@@ -166,7 +213,6 @@ const App: React.FC = () => {
         Object.entries(radii).forEach(([id, radius]) => {
             const numericId = parseInt(id, 10);
             if (layerRefs.current[numericId]) {
-                // Fix: Ensure radius is treated as a number before arithmetic operation.
                 const radiusInMeters = Number(radius) * 1000;
                 layerRefs.current[numericId].circle.setRadius(radiusInMeters);
                 
@@ -181,6 +227,23 @@ const App: React.FC = () => {
             }
         });
     }, [radii]);
+    
+    // Effect to toggle the heatmap layer
+    useEffect(() => {
+        if (!mapRef.current || !heatmapLayerRef.current) return;
+        const map = mapRef.current;
+        const heatmap = heatmapLayerRef.current;
+    
+        if (showHeatmap) {
+            if (!map.hasLayer(heatmap)) {
+                map.addLayer(heatmap);
+            }
+        } else {
+            if (map.hasLayer(heatmap)) {
+                map.removeLayer(heatmap);
+            }
+        }
+    }, [showHeatmap]);
 
     // Effect for synchronizing all radii with the uniform radius
     useEffect(() => {
@@ -204,10 +267,52 @@ const App: React.FC = () => {
         });
     }, [showLabels]);
 
+    // Effect to toggle clustering
+    useEffect(() => {
+        if (!mapRef.current || !markerClusterGroupRef.current) return;
+        const map = mapRef.current;
+        const markerClusterGroup = markerClusterGroupRef.current;
+
+        if (isClusteringEnabled) {
+            // Remove individual markers if they were added
+            Object.values(layerRefs.current).forEach(({ marker }) => {
+                if (map.hasLayer(marker)) {
+                    map.removeLayer(marker);
+                }
+            });
+            // Add cluster group
+            if (!map.hasLayer(markerClusterGroup)) {
+                map.addLayer(markerClusterGroup);
+            }
+        } else {
+            // Remove cluster group
+            if (map.hasLayer(markerClusterGroup)) {
+                map.removeLayer(markerClusterGroup);
+            }
+            // Add individual markers
+            Object.values(layerRefs.current).forEach(({ marker }) => {
+                if (!map.hasLayer(marker)) {
+                    map.addLayer(marker);
+                }
+            });
+        }
+    }, [isClusteringEnabled]);
+
     const handleLocationSelect = (loc: LocationData) => {
-        if (mapRef.current) {
-            mapRef.current.flyTo([loc.lat, loc.lng], 12);
-            layerRefs.current[loc.id].marker.openPopup();
+        if (mapRef.current && layerRefs.current[loc.id]) {
+            const map = mapRef.current;
+            const { marker } = layerRefs.current[loc.id];
+            
+            if (isClusteringEnabled && markerClusterGroupRef.current) {
+                // Use zoomToShowLayer to navigate to the marker, even if it's in a cluster
+                markerClusterGroupRef.current.zoomToShowLayer(marker, () => {
+                    marker.openPopup();
+                });
+            } else {
+                // When clustering is off, just pan to the marker's location and open the popup
+                map.setView(marker.getLatLng(), 13); // Zoom level 13 is a reasonable detail level
+                marker.openPopup();
+            }
         }
     };
 
@@ -245,6 +350,26 @@ const App: React.FC = () => {
                 {/* Global Controls */}
                 <div className="mt-4 pt-4 border-t border-gray-200">
                     <h3 className="font-bold text-lg mb-2">Global Controls</h3>
+                    <div className="flex items-center justify-between mb-3">
+                        <label htmlFor="enable-clustering" className="font-semibold text-gray-700">Enable Clustering</label>
+                        <input
+                            type="checkbox"
+                            id="enable-clustering"
+                            checked={isClusteringEnabled}
+                            onChange={(e) => setIsClusteringEnabled(e.target.checked)}
+                            className="h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                    </div>
+                    <div className="flex items-center justify-between mb-3">
+                        <label htmlFor="show-heatmap" className="font-semibold text-gray-700">Show Heatmap</label>
+                        <input
+                            type="checkbox"
+                            id="show-heatmap"
+                            checked={showHeatmap}
+                            onChange={(e) => setShowHeatmap(e.target.checked)}
+                            className="h-5 w-5 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                        />
+                    </div>
                     <div className="flex items-center justify-between mb-3">
                         <label htmlFor="show-labels" className="font-semibold text-gray-700">Show Labels</label>
                         <input
