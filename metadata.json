@@ -1,0 +1,5 @@
+{
+  "name": "UK Courier Hotspot Map",
+  "description": "An interactive map of the UK displaying courier demand hotspots. Users can view locations, see courier needs, and adjust coverage radii for localized campaign planning.",
+  "requestFramePermissions": []
+}
